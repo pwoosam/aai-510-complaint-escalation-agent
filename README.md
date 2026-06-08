@@ -56,9 +56,15 @@ The project combines Databricks AI tools, retrieval-augmented generation (RAG), 
 * `internal_policy_playbook.txt` – Internal escalation procedures
 * `README.md` – Project documentation
 
+
 ## Dataset
 
 The project uses the CFPB Consumer Complaints dataset as the primary source of customer complaint information. Internal escalation policies are used as a secondary retrieval source for operational guidance.
+
+CFPB Consumer Complaints Dataset (Kaggle):
+https://www.kaggle.com/datasets/sherrytp/consumer-complaints/data
+
+The raw dataset is not included in this repository due to file size limitations. Users should download the dataset from Kaggle and upload it to Databricks before running the data engineering pipeline.
 
 ## License
 
