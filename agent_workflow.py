@@ -21,12 +21,7 @@ from openai import OpenAI
 from pydantic import BaseModel
 from unitycatalog.ai.core.base import get_uc_function_client
 
-############################################
-# Define your LLM endpoint and system prompt
-############################################
-LLM_ENDPOINT_NAME = "test-5-4-mini"
-
-SYSTEM_PROMPT = """You are the Triage Router for Northstar Financial Services. Your role is to evaluate incoming customer messages, determine if they fall within our operational banking scope, and enforce structural schema formatting.
+ROUTER_PROMPT = """You are the Triage Router for Northstar Financial Services. Your role is to evaluate incoming customer messages, determine if they fall within our operational banking scope, and enforce structural schema formatting.
 
 ### Core Persona and Compliance Mandate:
 - You must analyze the customer's message
@@ -59,6 +54,39 @@ You must respond strictly in a raw JSON object format. Do not include markdown b
 4. "rejection_response": String. Populated only if "is_in_scope" is false. If the customer complaint is valid and in scope, this field must be an empty string "".
 5. "reason": String. A concise, single-sentence technical justification outlining why you classified and routed the complaint this way."""
 
+REASONING_PROMPT = """You are the Senior Operations Escalation Specialist and Corporate Communications Analyst for Northstar Financial Services. Your role is to analyze an active customer complaint by synthesizing historical context and applying strict corporate resolution playbooks to determine systemic root causes, recommend compliant internal fixes, and draft professional external messaging.
+
+### Input Context Provided:
+1. <current_complaint>: The active consumer grievance that has been validated and categorized as in-scope by our triage system.
+2. <historical_precedents>: Vector search results containing past similar banking complaints and their final resolutions. 
+3. <resolution_playbooks>: Direct excerpts from Northstar’s corporate compliance manuals matching the complaint category.
+
+### Core Directives & Analytical Strategy:
+- Root-Cause Synthesis: Cross-reference the active complaint against <historical_precedents> to determine if the customer is facing a recurring platform defect, a systemic billing error, or an isolated operational bottleneck.
+- Playbook Constraint Adherence: Your suggested remediation steps must strictly align with the thresholds and mandates provided in <resolution_playbooks> (e.g., specific fee waiver caps, timeline commitments, or department routings). 
+- Hallucination Prevention: If either the <historical_precedents> or <resolution_playbooks> blocks are empty or contain no data, you must rely solely on general, conservative banking compliance principles. Do not invent corporate policies, threshold values, or past case histories that are not explicitly provided in the context.
+- Legal & Tone Guardrails: The customer email body must be empathetic and objective, but it must strictly maintain corporate boundaries. Do not explicitly admit legal liability, do not cite internal system processing vulnerabilities, and do not use phrases that legally compromise Northstar Financial Services. 
+
+### Output Format Constraints:
+You must respond strictly in a raw, valid JSON object format to maintain automated workflow compatibility. Do not wrap the output in markdown block code wrappers (e.g., do not use ```json). The output must follow this exact schema:
+
+{
+  "assigned_department": "String (Must be exactly one of the following corporate units: 'Billing Adjustments', 'Retail Operations', 'Digital Banking Engineering', or 'HR Compliance')",
+  "root_cause_analysis": "String (A highly detailed, professional breakdown explaining the operational, technical, or staffing failure based on the complaint text and historical precedent patterns)",
+  "recommended_actions": [
+    {
+      "action_item": "String (A discrete, actionable internal task, e.g., 'Waive the $35 overdraft fee')",
+      "justification_source": "String (The exact policy document reference or precedent case ID that authorizes this specific task)"
+    }
+  ],
+  "priority_level": "String (Must map strictly to: 'CRITICAL', 'HIGH', 'MEDIUM', or 'LOW')",
+  "customer_email": {
+    "subject": "String (A concise, professional email subject line containing a tracking code placeholder)",
+    "body": "String (A multi-paragraph email text block. It must start naturally with a formal greeting, move into an empathetic acknowledgment of the friction, explain the exact operational changes being made to resolve the root cause, and close with a professional sign-off)"
+  }
+}"""
+
+uc_function_client = get_uc_function_client()
 
 ###############################################################################
 ## Define tools for your agent, enabling it to retrieve data or take actions
@@ -78,7 +106,6 @@ class ToolInfo(BaseModel):
     spec: dict
     exec_fn: Callable
 
-
 def create_tool_info(tool_spec, exec_fn_param: Optional[Callable] = None):
     tool_spec["function"].pop("strict", None)
     tool_name = tool_spec["function"]["name"]
@@ -94,36 +121,29 @@ def create_tool_info(tool_spec, exec_fn_param: Optional[Callable] = None):
             return function_result.value
     return ToolInfo(name=tool_name, spec=tool_spec, exec_fn=exec_fn_param or exec_fn)
 
+def create_tool_infos(uc_tool_names, additional_tool_infos=[]):
+    tool_infos = []
 
-TOOL_INFOS = []
+    uc_toolkit = UCFunctionToolkit(function_names=uc_tool_names)
+    for tool_spec in uc_toolkit.tools:
+        tool_infos.append(create_tool_info(tool_spec))
 
-# You can use UDFs in Unity Catalog as agent tools
-# TODO: Add additional tools
-UC_TOOL_NAMES = []
+    # # (Optional) Use Databricks vector search indexes as tools
+    # # See https://docs.databricks.com/generative-ai/agent-framework/unstructured-retrieval-tools.html
+    # # for details
+    # # TODO: Add vector via passing a VectorSearchRetrieverTool to  additional_tool_infos
+    # eg. create_tool_infos([], additional_tool_infos=[VectorSearchRetrieverTool(
+    #         index_name="",
+    #         # filters="..."
+    # )])
+    for tool_info in additional_tool_infos:
+        tool_infos.append(tool_info)
 
-uc_toolkit = UCFunctionToolkit(function_names=UC_TOOL_NAMES)
-uc_function_client = get_uc_function_client()
-for tool_spec in uc_toolkit.tools:
-    TOOL_INFOS.append(create_tool_info(tool_spec))
+    return tool_infos
 
 
 # Use Databricks vector search indexes as tools
 # See [docs](https://docs.databricks.com/generative-ai/agent-framework/unstructured-retrieval-tools.html) for details
-
-# # (Optional) Use Databricks vector search indexes as tools
-# # See https://docs.databricks.com/generative-ai/agent-framework/unstructured-retrieval-tools.html
-# # for details
-VECTOR_SEARCH_TOOLS = []
-# # TODO: Add vector search indexes as tools or delete this block
-# VECTOR_SEARCH_TOOLS.append(
-#         VectorSearchRetrieverTool(
-#         index_name="",
-#         # filters="..."
-#     )
-# )
-for vs_tool in VECTOR_SEARCH_TOOLS:
-    TOOL_INFOS.append(create_tool_info(vs_tool.tool, vs_tool.execute))
-
 
 
 class ToolCallingAgent(ResponsesAgent):
@@ -131,8 +151,9 @@ class ToolCallingAgent(ResponsesAgent):
     Class representing a tool-calling Agent
     """
 
-    def __init__(self, llm_endpoint: str, tools: list[ToolInfo]):
+    def __init__(self, system_prompt: str, llm_endpoint: str, tools: list[ToolInfo]):
         """Initializes the ToolCallingAgent with tools."""
+        self.system_prompt = system_prompt
         self.llm_endpoint = llm_endpoint
         self.workspace_client = WorkspaceClient()
         self.model_serving_client: OpenAI = (
@@ -277,12 +298,46 @@ class ToolCallingAgent(ResponsesAgent):
             )
 
         messages = to_chat_completions_input([i.model_dump() for i in request.input])
-        if SYSTEM_PROMPT:
-            messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+        messages.insert(0, {"role": "system", "content": self.system_prompt})
         yield from self.call_and_run_tools(messages=messages)
 
+class CCEAgenticWorkflow(mlflow.pyfunc.PythonModel):
+    def __init__(self):
+        self.router_agent = ToolCallingAgent(
+            system_prompt=ROUTER_PROMPT,
+            llm_endpoint="test-5-4-mini",
+            tools=create_tool_infos([], additional_tool_infos=[]))
+        self.reasoning_agent = ToolCallingAgent(
+            system_prompt=REASONING_PROMPT,
+            llm_endpoint="test-5-4-mini",
+            tools=create_tool_infos([], additional_tool_infos=[]))
 
-# Log the model using MLflow
-mlflow.openai.autolog()
-AGENT = ToolCallingAgent(llm_endpoint=LLM_ENDPOINT_NAME, tools=TOOL_INFOS)
-mlflow.models.set_model(AGENT)
+    @mlflow.trace(span_type="AGENT", name="multi_agent_predict")
+    def predict(self, model_input: list[ResponsesAgentRequest]) -> ResponsesAgentResponse:
+        router_response = None
+        with mlflow.start_span(name="router_agent", span_type=SpanType.AGENT):
+            router_response = self.router_agent.predict(model_input[0])
+
+        router_result = router_response.output[-1].content[0]['text']
+        router_result_parsed = json.loads(router_result)
+
+        if not router_result_parsed['is_in_scope']:
+            return router_response
+
+        reasoning_response = None
+        with mlflow.start_span(name="reasoning_agent", span_type=SpanType.AGENT):
+            reasoning_response = self.reasoning_agent.predict({
+                "input": [
+                    {
+                        "role": "user",
+                        "content": f"""## Router decision:
+{router_result_parsed}
+
+## Customer Complaint:
+{model_input[0].input[0].content}"""
+                    }
+                ],
+                "custom_inputs": model_input[0].custom_inputs
+            })
+
+        return reasoning_response
