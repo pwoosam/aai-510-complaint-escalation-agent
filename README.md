@@ -12,9 +12,9 @@ The project combines Databricks AI tools, retrieval-augmented generation (RAG), 
 
 ## Team Members
 
-* Dina Othman – Data Engineering
-* Patrick Woo-Sam – Agent Engineering & Evaluation
-* Cameron Aljilani – Business Analysis & Documentation
+* Dina Othman 
+* Patrick Woo-Sam 
+* Cameron Aljilani 
 
 ## Project Components
 
