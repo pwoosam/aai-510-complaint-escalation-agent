@@ -56,6 +56,12 @@ You must respond strictly in a raw JSON object format. Do not include markdown b
 
 REASONING_PROMPT = """You are the Senior Operations Escalation Specialist and Corporate Communications Analyst for Northstar Financial Services. Your role is to analyze an active customer complaint by synthesizing historical context and applying strict corporate resolution playbooks to determine systemic root causes, recommend compliant internal fixes, and draft professional external messaging.
 
+You have access to two tools:
+- One for searching historical customer complaints
+- One for searching internal policy playbooks (`playbooks_index`)
+
+Use these tools to ground your analysis and recommendations.
+
 ### Input Context Provided:
 1. <current_complaint>: The active consumer grievance that has been validated and categorized as in-scope by our triage system.
 2. <historical_precedents>: Vector search results containing past similar banking complaints and their final resolutions. 
@@ -121,23 +127,15 @@ def create_tool_info(tool_spec, exec_fn_param: Optional[Callable] = None):
             return function_result.value
     return ToolInfo(name=tool_name, spec=tool_spec, exec_fn=exec_fn_param or exec_fn)
 
-def create_tool_infos(uc_tool_names, additional_tool_infos=[]):
+def create_tool_infos(uc_tool_names, vs_tools=[]):
     tool_infos = []
 
     uc_toolkit = UCFunctionToolkit(function_names=uc_tool_names)
     for tool_spec in uc_toolkit.tools:
         tool_infos.append(create_tool_info(tool_spec))
 
-    # # (Optional) Use Databricks vector search indexes as tools
-    # # See https://docs.databricks.com/generative-ai/agent-framework/unstructured-retrieval-tools.html
-    # # for details
-    # # TODO: Add vector via passing a VectorSearchRetrieverTool to  additional_tool_infos
-    # eg. create_tool_infos([], additional_tool_infos=[VectorSearchRetrieverTool(
-    #         index_name="",
-    #         # filters="..."
-    # )])
-    for tool_info in additional_tool_infos:
-        tool_infos.append(tool_info)
+    for vs_tool in vs_tools:
+        tool_infos.append(create_tool_info(vs_tool.tool, vs_tool.execute))
 
     return tool_infos
 
@@ -305,12 +303,19 @@ class CCEAgenticWorkflow(mlflow.pyfunc.PythonModel):
     def __init__(self):
         self.router_agent = ToolCallingAgent(
             system_prompt=ROUTER_PROMPT,
-            llm_endpoint="test-5-4-mini",
-            tools=create_tool_infos([], additional_tool_infos=[]))
+            llm_endpoint="databricks-meta-llama-3-3-70b-instruct",
+            tools=create_tool_infos([], vs_tools=[]))
+        # === Vector Search Tools ===
+        complaint_tool = VectorSearchRetrieverTool(
+            index_name="main.default.cleaned_cfpb_sample_index")
+        playbook_tool = VectorSearchRetrieverTool(
+            index_name="main.default.playbooks_index")
+        # End of added vector search tools        
         self.reasoning_agent = ToolCallingAgent(
             system_prompt=REASONING_PROMPT,
-            llm_endpoint="test-5-4-mini",
-            tools=create_tool_infos([], additional_tool_infos=[]))
+            llm_endpoint="databricks-meta-llama-3-3-70b-instruct",
+            tools=create_tool_infos([], vs_tools=[complaint_tool, playbook_tool]))
+            # Referenced vector search tools
 
     @mlflow.trace(span_type="AGENT", name="multi_agent_predict")
     def predict(self, model_input: list[ResponsesAgentRequest]) -> ResponsesAgentResponse:
