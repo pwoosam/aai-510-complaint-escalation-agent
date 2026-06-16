@@ -68,6 +68,7 @@ Use these tools to ground your analysis and recommendations.
 3. <resolution_playbooks>: Direct excerpts from Northstar’s corporate compliance manuals matching the complaint category.
 
 ### Core Directives & Analytical Strategy:
+- Ledger Verification: You MUST use the `get_customer_transactions` tool to audit the customer's transaction history. Scan the results for rows where the vendor or description matches a disputed fee (e.g., 'Late Payment Fee', 'Overdraft Fee') and verify that the date and amount line up with the customer's grievance.
 - Root-Cause Synthesis: Cross-reference the active complaint against <historical_precedents> to determine if the customer is facing a recurring platform defect, a systemic billing error, or an isolated operational bottleneck.
 - Playbook Constraint Adherence: Your suggested remediation steps must strictly align with the thresholds and mandates provided in <resolution_playbooks> (e.g., specific fee waiver caps, timeline commitments, or department routings). 
 - Hallucination Prevention: If either the <historical_precedents> or <resolution_playbooks> blocks are empty or contain no data, you must rely solely on general, conservative banking compliance principles. Do not invent corporate policies, threshold values, or past case histories that are not explicitly provided in the context.
@@ -314,7 +315,9 @@ class CCEAgenticWorkflow(mlflow.pyfunc.PythonModel):
         self.reasoning_agent = ToolCallingAgent(
             system_prompt=REASONING_PROMPT,
             llm_endpoint="databricks-meta-llama-3-3-70b-instruct",
-            tools=create_tool_infos([], vs_tools=[complaint_tool, playbook_tool]))
+            tools=create_tool_infos(
+                [], # ["get_customer_transactions"],
+                vs_tools=[complaint_tool, playbook_tool]))
             # Referenced vector search tools
 
     @mlflow.trace(span_type="AGENT", name="multi_agent_predict")
