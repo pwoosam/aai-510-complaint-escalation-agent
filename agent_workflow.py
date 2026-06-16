@@ -301,10 +301,10 @@ class ToolCallingAgent(ResponsesAgent):
         yield from self.call_and_run_tools(messages=messages)
 
 class CCEAgenticWorkflow(mlflow.pyfunc.PythonModel):
-    def __init__(self):
+    def __init__(self, router_llm="databricks-meta-llama-3-1-8b-instruct", reasoning_llm="databricks-meta-llama-3-3-70b-instruct"):
         self.router_agent = ToolCallingAgent(
             system_prompt=ROUTER_PROMPT,
-            llm_endpoint="databricks-meta-llama-3-3-70b-instruct",
+            llm_endpoint=router_llm,
             tools=create_tool_infos([], vs_tools=[]))
         # === Vector Search Tools ===
         complaint_tool = VectorSearchRetrieverTool(
@@ -314,38 +314,63 @@ class CCEAgenticWorkflow(mlflow.pyfunc.PythonModel):
         # End of added vector search tools        
         self.reasoning_agent = ToolCallingAgent(
             system_prompt=REASONING_PROMPT,
-            llm_endpoint="databricks-meta-llama-3-3-70b-instruct",
+            llm_endpoint=reasoning_llm,
             tools=create_tool_infos(
-                [], # ["get_customer_transactions"],
+                ["main.default.get_customer_transactions"],
                 vs_tools=[complaint_tool, playbook_tool]))
             # Referenced vector search tools
 
+    def _strip_codeblocks(self, text):
+        content = text.strip().replace('\xa0', ' ').replace('“', '"').replace('”', '"')
+        if content.startswith('```'):
+            # Remove opening fence (```json or ```)
+            content = content.split('\n', 1)[1] if '\n' in content else content
+            # Remove closing fence
+            if content.endswith('```'):
+                content = content.rsplit('```', 1)[0]
+        return content
+    
+    def predict_json(self, agent_name, agent, model_input, max_retries = 5):
+        attempt = 1
+        while attempt <= max_retries:
+            response = None
+            mlflow_name = f'{agent_name}_{attempt}'
+            with mlflow.start_span(name=mlflow_name, span_type=SpanType.AGENT):
+                response = agent.predict(model_input)
+
+            response.output[-1].content[0]['text'] = self._strip_codeblocks(response.output[-1].content[0]['text'])
+            try:
+                result_parsed = json.loads(response.output[-1].content[0]['text'])
+            except json.JSONDecodeError:
+                attempt += 1
+
+                if attempt > max_retries:
+                    raise
+                continue
+
+            return response
+
     @mlflow.trace(span_type="AGENT", name="multi_agent_predict")
     def predict(self, model_input: list[ResponsesAgentRequest]) -> ResponsesAgentResponse:
-        router_response = None
-        with mlflow.start_span(name="router_agent", span_type=SpanType.AGENT):
-            router_response = self.router_agent.predict(model_input[0])
-
+        router_response = self.predict_json("router_agent", self.router_agent, model_input[0])
         router_result = router_response.output[-1].content[0]['text']
         router_result_parsed = json.loads(router_result)
 
         if not router_result_parsed['is_in_scope']:
             return router_response
 
-        reasoning_response = None
-        with mlflow.start_span(name="reasoning_agent", span_type=SpanType.AGENT):
-            reasoning_response = self.reasoning_agent.predict({
-                "input": [
-                    {
-                        "role": "user",
-                        "content": f"""## Router decision:
+        reasoning_response = self.predict_json("reasoning_agent", self.reasoning_agent, {
+            "input": [
+                {
+                    "role": "user",
+                    "content": f"""## Router decision:
 {router_result_parsed}
 
 ## Customer Complaint:
 {model_input[0].input[0].content}"""
-                    }
-                ],
-                "custom_inputs": model_input[0].custom_inputs
-            })
+                }
+            ],
+            "custom_inputs": model_input[0].custom_inputs
+        })
 
         return reasoning_response
