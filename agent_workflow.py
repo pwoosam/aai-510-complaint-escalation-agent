@@ -21,6 +21,8 @@ from openai import OpenAI
 from pydantic import BaseModel
 from unitycatalog.ai.core.base import get_uc_function_client
 
+# Define agent prompts for the workflow
+
 ROUTER_PROMPT = """You are the Triage Router for Northstar Financial Services. Your role is to evaluate incoming customer messages, determine if they fall within our operational banking scope, and enforce structural schema formatting.
 
 ### Core Persona and Compliance Mandate:
@@ -93,6 +95,8 @@ You must respond strictly in a raw, valid JSON object format to maintain automat
   }
 }"""
 
+# Create helper methods for tool calling
+
 uc_function_client = get_uc_function_client()
 
 ###############################################################################
@@ -131,19 +135,18 @@ def create_tool_info(tool_spec, exec_fn_param: Optional[Callable] = None):
 def create_tool_infos(uc_tool_names, vs_tools=[]):
     tool_infos = []
 
+    # Add Unity Catalog tools
     uc_toolkit = UCFunctionToolkit(function_names=uc_tool_names)
     for tool_spec in uc_toolkit.tools:
         tool_infos.append(create_tool_info(tool_spec))
 
+    # Add Vector Search tools
     for vs_tool in vs_tools:
         tool_infos.append(create_tool_info(vs_tool.tool, vs_tool.execute))
 
     return tool_infos
 
-
-# Use Databricks vector search indexes as tools
-# See [docs](https://docs.databricks.com/generative-ai/agent-framework/unstructured-retrieval-tools.html) for details
-
+# Define ToolCallingAgent with agentic loop that supports tool-calling
 
 class ToolCallingAgent(ResponsesAgent):
     """
@@ -164,10 +167,10 @@ class ToolCallingAgent(ResponsesAgent):
         """Returns tool specifications in the format OpenAI expects."""
         return [tool_info.spec for tool_info in self._tools_dict.values()]
 
-    @mlflow.trace(span_type=SpanType.TOOL)
     def execute_tool(self, tool_name: str, args: dict) -> Any:
         """Executes the specified tool with the given arguments."""
-        return self._tools_dict[tool_name].exec_fn(**args)
+        with mlflow.start_span(name=tool_name.replace('__', '.'), span_type=SpanType.TOOL):
+            return self._tools_dict[tool_name].exec_fn(**args)
 
     @staticmethod
     def _merge_consecutive_assistant_messages(cc_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -274,6 +277,8 @@ class ToolCallingAgent(ResponsesAgent):
                     "mlflow.trace.session": session_id,
                 }
             )
+        
+        mlflow.get_current_active_span().set_attribute("model_name", self.llm_endpoint)
 
         outputs = [
             event.item
@@ -300,17 +305,26 @@ class ToolCallingAgent(ResponsesAgent):
         messages.insert(0, {"role": "system", "content": self.system_prompt})
         yield from self.call_and_run_tools(messages=messages)
 
+# Define multi-agent workflow
+
 class CCEAgenticWorkflow(mlflow.pyfunc.PythonModel):
+    '''A multi-agent workflow for routing customer complaints and reasoning the appropriate action and escalation.'''
+
     def __init__(self, router_llm="databricks-meta-llama-3-1-8b-instruct", reasoning_llm="databricks-meta-llama-3-3-70b-instruct"):
+        self.router_llm = router_llm
+        self.reasoning_llm = reasoning_llm
+
         self.router_agent = ToolCallingAgent(
             system_prompt=ROUTER_PROMPT,
             llm_endpoint=router_llm,
             tools=create_tool_infos([], vs_tools=[]))
         # === Vector Search Tools ===
         complaint_tool = VectorSearchRetrieverTool(
-            index_name="main.default.cleaned_cfpb_sample_index")
+            index_name="main.default.cleaned_cfpb_sample_index",
+            disable_notice=True)
         playbook_tool = VectorSearchRetrieverTool(
-            index_name="main.default.playbooks_index")
+            index_name="main.default.playbooks_index",
+            disable_notice=True)
         # End of added vector search tools        
         self.reasoning_agent = ToolCallingAgent(
             system_prompt=REASONING_PROMPT,
@@ -318,39 +332,38 @@ class CCEAgenticWorkflow(mlflow.pyfunc.PythonModel):
             tools=create_tool_infos(
                 ["main.default.get_customer_transactions"],
                 vs_tools=[complaint_tool, playbook_tool]))
-            # Referenced vector search tools
 
     def _strip_codeblocks(self, text):
+        '''Remove illegal characters and strip codeblocks from text.'''
         content = text.strip().replace('\xa0', ' ').replace('“', '"').replace('”', '"')
         if content.startswith('```'):
-            # Remove opening fence (```json or ```)
             content = content.split('\n', 1)[1] if '\n' in content else content
-            # Remove closing fence
             if content.endswith('```'):
                 content = content.rsplit('```', 1)[0]
         return content
     
     def predict_json(self, agent_name, agent, model_input, max_retries = 5):
+        '''Perform a prediction with retry logic if the agent does not produce valid JSON.'''
         attempt = 1
-        while attempt <= max_retries:
-            response = None
-            mlflow_name = f'{agent_name}_{attempt}'
-            with mlflow.start_span(name=mlflow_name, span_type=SpanType.AGENT):
-                response = agent.predict(model_input)
+        with mlflow.start_span(name=f"{agent_name}_predict_with_retry", span_type=SpanType.WORKFLOW):
+            while attempt <= max_retries:
+                response = None
+                with mlflow.start_span(name=f"attempt_{attempt}", span_type=SpanType.CHAIN):
+                    response = agent.predict(model_input)
 
-            response.output[-1].content[0]['text'] = self._strip_codeblocks(response.output[-1].content[0]['text'])
-            try:
-                result_parsed = json.loads(response.output[-1].content[0]['text'])
-            except json.JSONDecodeError:
-                attempt += 1
+                response.output[-1].content[0]['text'] = self._strip_codeblocks(response.output[-1].content[0]['text'])
+                try:
+                    result_parsed = json.loads(response.output[-1].content[0]['text'])
+                except json.JSONDecodeError:
+                    attempt += 1
 
-                if attempt > max_retries:
-                    raise
-                continue
+                    if attempt > max_retries:
+                        raise
+                    continue
 
-            return response
+                return response
 
-    @mlflow.trace(span_type="AGENT", name="multi_agent_predict")
+    @mlflow.trace(span_type=SpanType.WORKFLOW, name="multi_agent_predict")
     def predict(self, model_input: list[ResponsesAgentRequest]) -> ResponsesAgentResponse:
         router_response = self.predict_json("router_agent", self.router_agent, model_input[0])
         router_result = router_response.output[-1].content[0]['text']
