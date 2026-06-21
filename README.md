@@ -2,7 +2,7 @@
 
 This project was developed for **AAI-510: Agent Systems and Tool Use** in the Applied Artificial Intelligence Program at the University of San Diego (USD).
 
-**Project Status:** In Progress
+**Project Status:** Complete
 
 ## Project Overview
 
@@ -31,7 +31,7 @@ The project combines Databricks AI tools, retrieval-augmented generation (RAG), 
 * Router model for complaint classification
 * Reasoning model for escalation decisions
 * Customer response generation
-* Tool integration with Databricks Vector Search
+* Tool integration with Databricks Vector Search and SQL Unity Catalog Functions
 
 ### Evaluation
 
@@ -52,9 +52,14 @@ The project combines Databricks AI tools, retrieval-augmented generation (RAG), 
 
 ## Repository Structure
 
-* `CFPB_Data_Engineering.ipynb` – Data engineering pipeline
-* `internal_policy_playbook.txt` – Internal escalation procedures
-* `README.md` – Project documentation
+* `agent_workflow.ipynb` - Notebook for testing, tracing, and evaluating example complaints using the agentic workflow.
+* `agent_workflow.py` - Agentic workflow for evaluating customer complaints
+* `agent_workflow_setup.ipynb` - Notebook to create `predictions` table, `customer_transactions` table, and `get_customer_transactions` SQL UC Function/Tool
+* `CFPB_Data_Engineering.ipynb` - Data engineering pipeline
+* `export_traces.ipynb` - Exports MLflow experiment traces to excel
+* `mlflow_traces` - Destination folder for exported MLflow experiment traces
+* `internal_policy_playbook.txt` - Internal escalation procedures
+* `README.md` - Project documentation
 
 
 ## Dataset
